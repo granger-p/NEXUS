@@ -1,9 +1,10 @@
+
 import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
+from groq import Groq
 from pydantic import BaseModel
 
 load_dotenv()
@@ -35,29 +36,66 @@ def health():
 
 @app.post("/api/chat")
 def chat(request: ChatRequest):
-    api_key = os.getenv("GEMINI_API_KEY")
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+    api_key = os.getenv("GROQ_API_KEY")
+    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
     if not api_key:
         raise HTTPException(
             status_code=500,
-            detail="Gemini API key is missing."
+            detail="Groq API key is missing."
         )
+
+    system_instruction = """
+You are NEXUS, an AI software engineering agent that helps
+developers understand, build, modify, and debug codebases.
+
+CORE CAPABILITIES:
+- Understand project structures, files, dependencies and architecture.
+- Generate clean, efficient and maintainable code.
+- Follow existing project conventions.
+- Analyze errors and suggest debugging solutions.
+- Assist with file management and terminal operations.
+- Never claim to execute commands or modify files without
+  actual tool confirmation.
+
+BEHAVIOUR:
+- Think like an experienced software engineer.
+- Be accurate, practical and concise.
+- Never invent project details or execution results.
+- Explain complex concepts step by step.
+- Prioritize security and maintainability.
+
+OBJECTIVE:
+Act as a reliable AI engineering partner throughout
+the software development lifecycle.
+"""
 
     try:
-        client = genai.Client(api_key=api_key)
+        client = Groq(api_key=api_key)
 
-        response = client.models.generate_content(
+        response = client.chat.completions.create(
             model=model,
-            contents=request.message
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_instruction
+                },
+                {
+                    "role": "user",
+                    "content": request.message
+                }
+            ]
         )
 
-        return {"reply": response.text}
+        reply = response.choices[0].message.content
+
+        return {"reply": reply or ""}
 
     except Exception as e:
-        print("Gemini Error:", str(e))
+        print("Groq Error:", repr(e))
 
         raise HTTPException(
-            status_code=500,
-            detail="Gemini request failed. Check the backend terminal."
+            status_code=502,
+            detail="Groq request failed. Check backend terminal."
         )
