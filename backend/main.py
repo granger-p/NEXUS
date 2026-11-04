@@ -1,5 +1,6 @@
 
 import os
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -20,8 +21,16 @@ app.add_middleware(
 )
 
 
+# Temporary conversation storage
+chat_history = {}
+
+# Keep only the latest 20 messages per conversation
+MAX_HISTORY_MESSAGES = 20
+
+
 class ChatRequest(BaseModel):
     message: str
+    chat_id: str | None = None
 
 
 @app.get("/")
@@ -45,6 +54,9 @@ def chat(request: ChatRequest):
             status_code=500,
             detail="Groq API key is missing."
         )
+
+    # Create a new conversation ID if one was not provided
+    chat_id = request.chat_id or str(uuid4())
 
     system_instruction = """
 You are NEXUS, an AI software engineering agent that helps
@@ -74,28 +86,49 @@ the software development lifecycle.
     try:
         client = Groq(api_key=api_key)
 
+        # Get the existing conversation history
+        previous_messages = chat_history.get(chat_id, [])
+
+        # Add the new user message to the messages sent to Groq
+        messages = [
+            {
+                "role": "system",
+                "content": system_instruction
+            },
+            *previous_messages,
+            {
+                "role": "user",
+                "content": request.message
+            }
+        ]
+
         response = client.chat.completions.create(
             model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_instruction
-                },
-                {
-                    "role": "user",
-                    "content": request.message
-                }
-            ]
+            messages=messages
         )
 
-        reply = response.choices[0].message.content
+        reply = response.choices[0].message.content or ""
 
-        return {"reply": reply or ""}
+        # Save the user message and assistant response
+        updated_history = messages[1:] + [
+            {
+                "role": "assistant",
+                "content": reply
+            }
+        ]
+
+        # Keep only the latest 20 messages
+        chat_history[chat_id] = updated_history[-MAX_HISTORY_MESSAGES:]
+
+        return {
+            "chat_id": chat_id,
+            "reply": reply
+        }
 
     except Exception as e:
         print("Groq Error:", repr(e))
 
         raise HTTPException(
             status_code=502,
-            detail="Groq request failed. Check backend terminal."
+            detail="Groq request failed. Check the backend terminal."
         )
