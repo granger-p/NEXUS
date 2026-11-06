@@ -208,3 +208,76 @@ the software development lifecycle.
         "chat_id": str(chat_id),
         "reply": reply
     }
+@app.get("/api/conversations")
+def get_conversations(db: Session = Depends(get_db)):
+
+    conversations = (
+        db.query(Conversation)
+        .order_by(Conversation.updated_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "chat_id": str(chat.id),
+            "title": chat.title,
+            "created_at": chat.created_at,
+            "updated_at": chat.updated_at
+        }
+        for chat in conversations
+    ]
+@app.get("/api/conversations/{chat_id}")
+def get_chat(chat_id: UUID, db: Session = Depends(get_db)):
+
+    conversation = (
+        db.query(Conversation)
+        .filter(Conversation.id == chat_id)
+        .first()
+    )
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found."
+        )
+
+    messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == chat_id)
+        .order_by(Message.created_at, Message.id)
+        .all()
+    )
+
+    return {
+        "chat_id": str(conversation.id),
+        "title": conversation.title,
+        "messages": [
+            {
+                "role": msg.role,
+                "content": msg.content,
+                "created_at": msg.created_at
+            }
+            for msg in messages
+        ]
+    }
+@app.delete("/api/conversations/{chat_id}")
+def delete_chat(chat_id: UUID, db: Session = Depends(get_db)):
+
+    conversation = (
+        db.query(Conversation)
+        .filter(Conversation.id == chat_id)
+        .first()
+    )
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found."
+        )
+
+    db.delete(conversation)
+    db.commit()
+
+    return {
+        "message": "Conversation deleted successfully."
+    }
