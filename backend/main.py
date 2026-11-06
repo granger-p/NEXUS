@@ -1,12 +1,15 @@
-
 import os
-from uuid import uuid4
+from uuid import uuid4, UUID
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 from groq import Groq
 from pydantic import BaseModel
+
+from database import get_db
+from models import Conversation, Message
 
 load_dotenv()
 
@@ -21,10 +24,6 @@ app.add_middleware(
 )
 
 
-# Temporary conversation storage
-chat_history = {}
-
-# Keep only the latest 20 messages per conversation
 MAX_HISTORY_MESSAGES = 20
 
 
@@ -44,7 +43,7 @@ def health():
 
 
 @app.post("/api/chat")
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
     api_key = os.getenv("GROQ_API_KEY")
     model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
@@ -55,8 +54,60 @@ def chat(request: ChatRequest):
             detail="Groq API key is missing."
         )
 
-    # Create a new conversation ID if one was not provided
-    chat_id = request.chat_id or str(uuid4())
+    # STEP 1: Find or create conversation
+
+    if request.chat_id:
+
+        try:
+            chat_id = UUID(request.chat_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid conversation ID."
+            )
+
+        conversation = db.query(Conversation).filter(
+            Conversation.id == chat_id
+        ).first()
+
+        if not conversation:
+            raise HTTPException(
+                status_code=404,
+                detail="Conversation not found."
+            )
+
+    else:
+
+        conversation = Conversation(
+            title=request.message[:50]
+        )
+
+        db.add(conversation)
+        db.flush()
+
+        chat_id = conversation.id
+
+    # STEP 2: Retrieve previous messages
+
+    previous_messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == chat_id)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(MAX_HISTORY_MESSAGES)
+        .all()
+    )
+
+    previous_messages.reverse()
+
+    history = [
+        {
+            "role": msg.role,
+            "content": msg.content
+        }
+        for msg in previous_messages
+    ]
+
+    # STEP 3: Prepare messages for Groq
 
     system_instruction = """
 You are NEXUS, an AI software engineering agent that helps
@@ -83,24 +134,23 @@ Act as a reliable AI engineering partner throughout
 the software development lifecycle.
 """
 
+    messages = [
+        {
+            "role": "system",
+            "content": system_instruction
+        },
+        *history,
+        {
+            "role": "user",
+            "content": request.message
+        }
+    ]
+
+    # STEP 4: Get response from Groq
+
     try:
+
         client = Groq(api_key=api_key)
-
-        # Get the existing conversation history
-        previous_messages = chat_history.get(chat_id, [])
-
-        # Add the new user message to the messages sent to Groq
-        messages = [
-            {
-                "role": "system",
-                "content": system_instruction
-            },
-            *previous_messages,
-            {
-                "role": "user",
-                "content": request.message
-            }
-        ]
 
         response = client.chat.completions.create(
             model=model,
@@ -109,26 +159,52 @@ the software development lifecycle.
 
         reply = response.choices[0].message.content or ""
 
-        # Save the user message and assistant response
-        updated_history = messages[1:] + [
-            {
-                "role": "assistant",
-                "content": reply
-            }
-        ]
-
-        # Keep only the latest 20 messages
-        chat_history[chat_id] = updated_history[-MAX_HISTORY_MESSAGES:]
-
-        return {
-            "chat_id": chat_id,
-            "reply": reply
-        }
-
     except Exception as e:
+
+        db.rollback()
+
         print("Groq Error:", repr(e))
 
         raise HTTPException(
             status_code=502,
             detail="Groq request failed. Check the backend terminal."
         )
+
+    # STEP 5: Save both messages in PostgreSQL
+
+    try:
+
+        user_message = Message(
+            conversation_id=chat_id,
+            role="user",
+            content=request.message
+        )
+
+        assistant_message = Message(
+            conversation_id=chat_id,
+            role="assistant",
+            content=reply
+        )
+
+        db.add_all([
+            user_message,
+            assistant_message
+        ])
+
+        db.commit()
+
+    except Exception as e:
+
+        db.rollback()
+
+        print("Database Error:", repr(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save conversation."
+        )
+
+    return {
+        "chat_id": str(chat_id),
+        "reply": reply
+    }
